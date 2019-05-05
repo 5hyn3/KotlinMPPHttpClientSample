@@ -1,0 +1,118 @@
+apply plugin: 'kotlin-multiplatform'
+apply plugin: 'kotlinx-serialization'
+
+repositories {
+    maven { url "https://dl.bintray.com/kotlin/kotlinx" }
+    maven { url "https://dl.bintray.com/kotlin/ktor" }
+    maven { url "https://kotlin.bintray.com/kotlinx" }
+    mavenCentral()
+}
+
+kotlin {
+    targets {
+        final def iOSTarget = System.getenv('SDK_NAME')?.startsWith("iphoneos") \
+                              ? presets.iosArm64 : presets.iosX64
+
+        fromPreset(iOSTarget, 'iOS') {
+            compilations.main.outputKinds('FRAMEWORK')
+            compilations.test.outputKinds("FRAMEWORK")
+        }
+
+        fromPreset(presets.jvm, 'android')
+    }
+
+    sourceSets {
+        commonMain.dependencies {
+            implementation "org.jetbrains.kotlinx:kotlinx-coroutines-core-common:$kotlin_coroutine_version"
+            implementation "org.jetbrains.kotlinx:kotlinx-serialization-runtime-common:$kotlinx_serialization_version"
+            implementation "io.ktor:ktor-client-core:$ktor_version"
+            implementation "org.jetbrains.kotlin:kotlin-stdlib:$kotlin_version"
+            implementation "com.soywiz:klock-metadata:$klock_version"
+        }
+
+        commonTest.dependencies {
+            implementation 'org.jetbrains.kotlin:kotlin-test-annotations-common'
+            implementation "org.jetbrains.kotlin:kotlin-test:$kotlin_version"
+            implementation "org.jetbrains.kotlin:kotlin-test-junit:$kotlin_version"
+        }
+
+        androidMain.dependencies {
+            implementation "org.jetbrains.kotlinx:kotlinx-serialization-runtime:$kotlinx_serialization_version"
+            implementation "org.jetbrains.kotlinx:kotlinx-coroutines-android:$kotlin_coroutine_version"
+            implementation "io.ktor:ktor-client-android:$ktor_version"
+            implementation "com.soywiz:klock-jvm:$klock_version"
+        }
+
+        androidTest.dependencies {
+            implementation "org.jetbrains.kotlin:kotlin-test:$kotlin_version"
+            implementation "org.jetbrains.kotlin:kotlin-test-junit:$kotlin_version"
+            implementation 'org.jetbrains.kotlin:kotlin-test-annotations-common'
+        }
+        iOSMain.dependencies {
+            implementation "org.jetbrains.kotlinx:kotlinx-serialization-runtime-native:$kotlinx_serialization_version"
+            implementation "io.ktor:ktor-client-ios:$ktor_version"
+            implementation "org.jetbrains.kotlinx:kotlinx-coroutines-core-native:$kotlin_coroutine_version"
+            implementation "com.soywiz:klock-iosx64:$klock_version"
+        }
+        iOSTest.dependencies {
+            implementation 'org.jetbrains.kotlin:kotlin-test'
+            implementation 'org.jetbrains.kotlin:kotlin-test-junit'
+            implementation 'org.jetbrains.kotlin:kotlin-test-annotations-common'
+        }
+    }
+}
+
+// workaround for https://youtrack.jetbrains.com/issue/KT-27170
+configurations {
+    compileClasspath
+}
+
+task iOSTest(type: Sync)  {
+    def device = project.findProperty("iosDevice")?.toString() ?: "iPhone 8"
+    dependsOn 'linkTestDebugExecutableIOS'
+    group = JavaBasePlugin.VERIFICATION_GROUP
+    description = "Runs tests for target 'ios' on an iOS simulator"
+
+    doLast {
+        def binary = kotlin.targets.ios.binaries.getExecutable('test', 'DEBUG').outputFile
+        exec {
+            commandLine 'xcrun', 'simctl', 'spawn', device, binary.absolutePath
+        }
+    }
+}
+
+task copyFramework {
+    def buildType = project.findProperty("kotlin.build.type") ?: "DEBUG"
+    dependsOn "link${buildType.toLowerCase().capitalize()}FrameworkIos"
+
+    doLast {
+        def srcFile = kotlin.targets.ios.binaries.getFramework(buildType).outputFile
+        def targetDir = getProperty("configuration.build.dir")
+        copy {
+            from srcFile.parent
+            into targetDir
+            include 'greeting.framework/**'
+            include 'greeting.framework.dSYM'
+        }
+    }
+}
+
+task packForXCode(type: Sync) {
+    final File frameworkDir = new File(buildDir, "xcode-frameworks")
+    final String mode = project.findProperty("XCODE_CONFIGURATION")?.toUpperCase() ?: 'DEBUG'
+
+    inputs.property "mode", mode
+    dependsOn kotlin.targets.iOS.compilations.main.linkTaskName("FRAMEWORK", mode)
+
+    from { kotlin.targets.iOS.compilations.main.getBinary("FRAMEWORK", mode).parentFile }
+    into frameworkDir
+
+    doLast {
+        new File(frameworkDir, 'gradlew').with {
+            text = "#!/bin/bash\nexport 'JAVA_HOME=${System.getProperty("java.home")}'\ncd '${rootProject.rootDir}'\n./gradlew \$@\n"
+            setExecutable(true)
+        }
+    }
+}
+
+tasks.build.dependsOn packForXCode
